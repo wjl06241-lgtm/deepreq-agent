@@ -25,6 +25,15 @@ const pool = { async query(sql, args) {
   if (sql.includes('AS "memberOpenIds"')) return { rows: [{ id: 'p-test', name: 'Test Project', createdAt: new Date() }] }
   if (sql.includes('SELECT payload')) return { rows: [] }
   if (sql.includes('FROM requirement_assistant.tasks t')) return { rows: [{ id: 't-test', status: 'completed', project: 'p-test' }] }
+  if (sql.includes('SELECT u.id, u.app_id AS "appId"')) return { rows: [
+    { id: 'u-current', appId: 'cli_test', openId: 'ou_current', enterpriseName: 'Test Hospital' },
+    { id: 'u-other', appId: 'cli_other', openId: 'ou_other', enterpriseName: 'Other Hospital' },
+  ] }
+  if (sql.includes('SELECT count(*)::int AS count FROM requirement_assistant.users')) return { rows: [{ count: 2 }] }
+  if (sql.includes('SELECT id,app_id AS "appId",external_user_id AS "openId"')) return {
+    rows: args[0] === 'cli_other' && args[1] === 'ou_other'
+      ? [{ id: 'u-other', appId: 'cli_other', openId: 'ou_other', name: 'Other User' }] : [],
+  }
   if (sql.includes('AS "messageCount"') && sql.includes('ORDER BY COALESCE')) return { rows: [{ id: 'c-test', messageCount: 2 }] }
   return { rows: [] }
 } }
@@ -32,7 +41,9 @@ const server = await createStandaloneAdmin({ cfg, pool })
 await new Promise(ok => server.listen(0, '127.0.0.1', ok))
 const base = 'http://127.0.0.1:' + server.address().port
 try {
-  assert.equal((await fetch(base)).status, 200)
+  const home = await fetch(base)
+  assert.equal(home.status, 200)
+  assert.doesNotMatch(await home.text(), /data-page="conversations"/)
   assert.equal((await fetch(base + '/api/status')).status, 401)
   assert.equal((await fetch(base + '/api/enterprise/catalog')).status, 401)
   const denied = await fetch(base + '/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'wrong' }) })
@@ -47,8 +58,16 @@ try {
   assert.equal(status.system.feishuConfigured, false)
   assert.equal(status.database.pending, null)
   assert.equal(status.tasks[0].id, 't-test')
+  const people = await (await fetch(base + '/api/admin/users', { headers })).json()
+  assert.equal(people.total, 2)
+  assert.deepEqual(people.users.map(u => u.appId), ['cli_test', 'cli_other'])
+  assert.ok(queries.some(q => q.sql.includes('SELECT u.id, u.app_id AS "appId"') && q.args[0] === null))
+  const otherUser = await (await fetch(base + '/api/admin/users/ou_other?appId=cli_other', { headers })).json()
+  assert.equal(otherUser.user.appId, 'cli_other')
+  assert.equal((await fetch(base + '/api/admin/users/ou_other?appId=bad', { headers })).status, 400)
   const conversations = await (await fetch(base + '/api/admin/conversations', { headers })).json()
   assert.equal(conversations.conversations[0].id, 'c-test')
+  assert.ok(queries.some(q => q.sql.includes('FROM requirement_assistant.conversations c JOIN requirement_assistant.users u') && q.args?.[0] === 'cli_test'))
   for (const item of queries.filter(q => q.sql.includes('SELECT payload') || q.sql.includes('FROM requirement_assistant.tasks t'))) assert.ok(item.args.includes('cli_test'))
   assert.equal((await fetch(base + '/api/enterprise/project', { method: 'POST', headers: { cookie }, body: '{}' })).status, 403)
   for (const [path, method] of [
@@ -77,6 +96,7 @@ const integrated = createAdminServer({ cfg, root, configFile: '', appVersion: 't
 await new Promise(ok => integrated.listen(0, '127.0.0.1', ok))
 try {
   const url = 'http://127.0.0.1:' + integrated.address().port
+  assert.match(await (await fetch(url)).text(), /data-page="conversations"/)
   const login = await fetch(url + '/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'test-password' }) })
   const headers = { cookie: login.headers.get('set-cookie').split(';')[0], 'x-csrf-token': (await login.json()).csrf }
   const status = await (await fetch(url + '/api/status', { headers })).json()

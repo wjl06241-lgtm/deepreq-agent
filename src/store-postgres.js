@@ -227,7 +227,8 @@ export class PostgresStore {
   async adminUsers({ search = '', limit = 100, offset = 0 } = {}) {
     const q = String(search).trim()
     const result = await this.pool.query(`
-      SELECT u.id, u.external_user_id AS "openId", u.display_name AS name,
+      SELECT u.id, u.app_id AS "appId", e.name AS "enterpriseName",
+        u.external_user_id AS "openId", u.display_name AS name,
         u.registration,
         u.avatar_url AS avatar, u.profile_status AS "profileStatus",
         u.created_at AS "createdAt", u.updated_at AS "updatedAt",
@@ -236,6 +237,8 @@ export class PostgresStore {
         COALESCE(s.attachments, 0)::int AS "attachmentCount",
         s.last_active_at AS "lastActiveAt"
       FROM ${S}.users u
+      LEFT JOIN ${S}.enterprise_apps ea ON ea.app_id=u.app_id
+      LEFT JOIN ${S}.enterprises e ON e.id=ea.enterprise_id
       LEFT JOIN LATERAL (
         SELECT
           (SELECT count(*) FROM ${S}.conversations c WHERE c.user_id=u.id) AS conversations,
@@ -243,18 +246,18 @@ export class PostgresStore {
           (SELECT count(*) FROM ${S}.attachments a WHERE a.user_id=u.id) AS attachments,
           (SELECT max(m.created_at) FROM ${S}.messages m WHERE m.user_id=u.id) AS last_active_at
       ) s ON true
-      WHERE u.platform='feishu' AND u.app_id=$1
+      WHERE u.platform='feishu' AND ($1::text IS NULL OR u.app_id=$1)
         AND ($2='' OR u.display_name ILIKE '%'||$2||'%' OR u.external_user_id ILIKE '%'||$2||'%')
       ORDER BY COALESCE(s.last_active_at,u.updated_at) DESC
       LIMIT $3 OFFSET $4
-    `, [this.appId, q, Math.min(Math.max(Number(limit)||100,1),500), Math.max(Number(offset)||0,0)])
+    `, [this.adminAllApps ? null : this.appId, q, Math.min(Math.max(Number(limit)||100,1),500), Math.max(Number(offset)||0,0)])
     const total = await this.pool.query(`SELECT count(*)::int AS count FROM ${S}.users
-      WHERE platform='feishu' AND app_id=$1
-        AND ($2='' OR display_name ILIKE '%'||$2||'%' OR external_user_id ILIKE '%'||$2||'%')`, [this.appId, q])
+      WHERE platform='feishu' AND ($1::text IS NULL OR app_id=$1)
+        AND ($2='' OR display_name ILIKE '%'||$2||'%' OR external_user_id ILIKE '%'||$2||'%')`, [this.adminAllApps ? null : this.appId, q])
     this.succeeded(); return { users: result.rows, total: total.rows[0].count }
   }
   async adminUserDetails(openId) {
-    const user = (await this.pool.query(`SELECT id,external_user_id AS "openId",display_name AS name,
+    const user = (await this.pool.query(`SELECT id,app_id AS "appId",external_user_id AS "openId",display_name AS name,
       registration,
       avatar_url AS avatar,profile_status AS "profileStatus",profile_updated_at AS "profileUpdatedAt",
       created_at AS "createdAt",updated_at AS "updatedAt"

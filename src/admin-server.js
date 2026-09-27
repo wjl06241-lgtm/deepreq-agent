@@ -209,7 +209,7 @@ export function createAdminServer({
     try {
       if (url.pathname === '/' || url.pathname === '/index.html') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(enterpriseDashboard(dashboardHtml()))
+        res.end(enterpriseDashboard(dashboardHtml({ standalone })))
         return
       }
       if (url.pathname === '/api/login' && req.method === 'POST') {
@@ -339,7 +339,10 @@ export function createAdminServer({
       }
       if (url.pathname.startsWith('/api/admin/users/')) {
         const openId = decodeURIComponent(url.pathname.slice('/api/admin/users/'.length))
-        const detail = await store.adminUserDetails?.(openId)
+        const requestedAppId = standalone ? url.searchParams.get('appId') : null
+        if (requestedAppId && !/^cli_[a-zA-Z0-9]+$/.test(requestedAppId)) return sendJson(res, { error: '应用 ID 无效' }, 400)
+        const scopedStore = requestedAppId ? Object.assign(Object.create(store), { appId: requestedAppId }) : store
+        const detail = await scopedStore.adminUserDetails?.(openId)
         return detail ? sendJson(res, detail) : sendJson(res, { error: '用户不存在' }, 404)
       }
       if (url.pathname === '/api/admin/conversations') {
