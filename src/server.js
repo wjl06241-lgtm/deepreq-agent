@@ -1,20 +1,25 @@
 // 需求助手 · 服务入口（飞书长连接 + DeepSeek API + 记录/监控/看板）
 
-import { createServer } from 'node:http'
+import { createAdminServer } from './admin-server.js'
 import { join, dirname } from 'node:path'
 import { mkdirSync, readFileSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { loadEnvFile, loadRuntimeConfig } from './config.js'
 import { JsonlStore, newRecordId } from './store.js'
+import { PostgresStore } from './store-postgres.js'
 import { ProjectRegistry } from './projects.js'
 import { MemoryStore } from './memory.js'
 import { createAssistant, isTextFile, buildFileMessageText, decodeTextBuffer, extractPdfText } from './assistant.js'
 import { chatCompletionVision, detectImageMime } from './llm.js'
-import { COMMAND_RE, scanUnanswered, resolveQuestion, isAnswered } from './monitor.js'
-import { startFeishu, createApiClient, sendToChat, sendToUser, downloadResource } from './feishu.js'
+import { scanUnanswered } from './monitor.js'
+import { startFeishu, createApiClient, sendToChat, sendToUser, downloadResource, sendFileToChat, getBotIdentity, isMessageForBot } from './feishu.js'
 import { UserResolver } from './users.js'
-import { dashboardHtml } from './dashboard.js'
+import { actorKey } from './identity.js'
+import { createHash } from 'node:crypto'
+import { Registration } from './registration.js'
+import { Enterprises } from './enterprises.js'
+import { ProjectConfiguration } from './project-configuration.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -22,20 +27,55 @@ async function main() {
   loadEnvFile(join(ROOT, '.env'))
   const cfg = loadRuntimeConfig()
   const configFile = join(ROOT, 'config.json')
-  const log = (msg) => console.log('[需求助手] ' + msg)
+  const appVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+  const startedAt = Date.now()
+  const instanceName = process.env.INSTANCE_NAME || ''
+  const log = (msg) => console.log('[需求助手' + (instanceName ? ':' + instanceName : '') + '] ' + msg)
 
   mkdirSync(cfg.dataDir, { recursive: true })
-  const store = new JsonlStore(cfg.dataDir)
+  const store = cfg.database.enabled
+    ? new PostgresStore(cfg.dataDir, { url: cfg.database.url, appId: cfg.feishu.appId, log })
+    : new JsonlStore(cfg.dataDir)
   await store.init()
   const projects = new ProjectRegistry(join(cfg.dataDir, 'projects.json'))
   await projects.load()
+  const enterprises = cfg.database.enabled ? new Enterprises(store.pool,cfg.feishu.appId) : null
+  const enterpriseMode = enterprises ? await enterprises.enabled() : false
+  const projectConfiguration=enterpriseMode ? new ProjectConfiguration(store.pool,process.env.PROJECT_MATERIALS_DIR || join(ROOT,'data','project-materials')) : null
+  store.enterpriseMode=enterpriseMode
+  if (enterpriseMode) await enterprises.refresh(projects)
   const memory = new MemoryStore(join(cfg.dataDir, 'memory'), cfg.maxHistoryTurns)
   await memory.init()
-  const users = new UserResolver(join(cfg.dataDir, 'users.json'))
+  // 飞书 open_id 与应用绑定；不同应用必须使用不同的本地用户缓存。
+  const appCacheKey = createHash('sha256').update(cfg.feishu.appId || 'local').digest('hex').slice(0, 16)
+  const users = new UserResolver(join(cfg.dataDir, `users-${appCacheKey}.json`))
+  const registration = new Registration(join(cfg.dataDir, `registration-${appCacheKey}.json`))
+  await registration.init()
   await users.init()
+  if (store.syncProfile) {
+    for (const profile of await store.readUsers()) {
+      const local = users.cache.get(profile.openId)
+      if (!local || profile.at > local.at) users.cache.set(profile.openId, profile)
+    }
+    await users.save()
+    users.onProfile = profile => store.syncProfile(profile)
+    for (const profile of users.list()) await store.syncProfile(profile)
+  }
 
   const feishuReady = Boolean(cfg.feishu.appId && cfg.feishu.appSecret)
+  registration.existing = new Set(users.list().map(profile => profile.openId))
   const apiClient = feishuReady ? createApiClient(cfg.feishu.appId, cfg.feishu.appSecret) : null
+  let botIdentity = null
+  let botIdentityRequest = null
+  const resolveBotIdentity = async () => {
+    if (botIdentity) return botIdentity
+    if (!apiClient) return null
+    if (!botIdentityRequest) botIdentityRequest = getBotIdentity(apiClient)
+      .then(value => { botIdentity = value; log('飞书机器人身份: ' + (value.name || value.openId)); return value })
+      .finally(() => { botIdentityRequest = null })
+    return botIdentityRequest
+  }
+  if (apiClient) await resolveBotIdentity().catch(err => log('飞书机器人身份读取失败: ' + (err?.message ?? err) + '（群聊暂不响应，避免误触发）'))
 
   // 启动自检：读取应用信息，确认 .env 的 App ID 对应正确的应用
   if (apiClient) {
@@ -51,13 +91,13 @@ async function main() {
     }
   }
 
-  const sendReply = async (chatId, text) => {
+  const sendReply = async (chatId, text, options) => {
     if (!apiClient) {
       log('（未配飞书凭据，回复仅打印）' + String(text).slice(0, 120).replace(/\n/g, ' '))
       return
     }
     log('回复 ' + chatId + ': ' + String(text).slice(0, 60).replace(/\n/g, ' '))
-    await sendToChat(apiClient, chatId, text)
+    await sendToChat(apiClient, chatId, text, options)
   }
 
   const alertAdmins = async (text) => {
@@ -73,13 +113,18 @@ async function main() {
   }
 
   const assistant = createAssistant({
-    cfg, configFile, root: ROOT, store, projects, memory,
+    cfg, configFile, root: ROOT, store, projects, memory,projectConfiguration,
     sendReply, alertAdmins, log,
+    sendFile: async (chatId, artifact, options) => {
+      if (!apiClient) throw new Error('飞书通道未连接')
+      await sendFileToChat(apiClient, chatId, artifact, options)
+    },
   })
+
+  await assistant.ready
 
   // ── 入站处理（按聊天串行 + 幂等） ──────────────────────────────────
   const seen = new Map()
-  const queues = new Map()
 
   const inboxDir = join(cfg.dataDir, 'inbox')
 
@@ -89,7 +134,7 @@ async function main() {
       await sendReply(msg.chatId, '📎 未配置飞书凭据，无法下载附件。')
       return
     }
-    const chatInbox = join(inboxDir, String(msg.chatId).replace(/[^A-Za-z0-9._-]/g, '-'))
+    const chatInbox = join(inboxDir, createHash('sha256').update(actorKey(msg)).digest('hex').slice(0,24))
     await mkdir(chatInbox, { recursive: true })
     const stamp = Date.now()
     const isImage = msg.kind === 'image'
@@ -125,13 +170,17 @@ async function main() {
         + '\n常见原因：① 未开通 im:resource 权限或未重新发布版本；② 资源已过期（重发一次试试）。')
       return
     }
-    const projectId = projects.activeFor(msg.chatId)?.id ?? ''
+    const projectId = assistant.projectFor(msg)?.id ?? ''
     await store.append({
       v: 1, id: newRecordId(), ts: Date.now(), kind: 'attachment', platform: 'feishu',
       chatId: msg.chatId, userId: msg.userId, userName: msg.userName, project: projectId,
       text: '[附件] ' + safeName, status: type, note: dest,
     })
-    log('附件已保存 ' + dest)
+    log('附件已保存 ' + safeName)
+    if (assistant.backendFor(msg) === 'codex') {
+      return assistant.processMessage({ ...msg, text: '请阅读本次附件，概述内容，并说明需要注意的问题。',
+        attachment: { file: dest, name: safeName } })
+    }
     if (isImage) {
       if (!cfg.vision.model) {
         await sendReply(msg.chatId, '🖼️ 已收到图片并保存：\n' + dest + '\n未配置视觉模型（.env 填 VISION_MODEL 即启用识别）。')
@@ -163,8 +212,8 @@ async function main() {
           imageDataUrl: dataUrl,
           maxTokens: cfg.llm.maxTokens,
         })
-        await memory.push(msg.chatId, projectId, 'user', '【飞书图片：' + safeName + '】请识别其中内容')
-        await memory.push(msg.chatId, projectId, 'assistant', text)
+        await memory.push(actorKey(msg), projectId, 'user', '【飞书图片：' + safeName + '】请识别其中内容')
+        await memory.push(actorKey(msg), projectId, 'assistant', text)
         await store.append({
           v: 1, id: newRecordId(), ts: Date.now(), kind: 'assistant_message', platform: 'feishu',
           chatId: msg.chatId, userId: msg.userId, userName: msg.userName, project: projectId,
@@ -219,8 +268,38 @@ async function main() {
   }
 
   const handleInbound = async (msg) => {
-    const name = await users.resolve(apiClient, msg.userId, log)
-    if (name && name !== msg.userId) msg.userName = name
+    actorKey(msg)
+    if (msg.chatType === 'group') {
+      const identity = botIdentity ?? await resolveBotIdentity().catch(() => null)
+      if (!isMessageForBot(msg, identity?.openId)) {
+        log('忽略未 @ 本机器人的群消息 ' + msg.chatId)
+        return
+      }
+      for (const mention of msg.mentions) {
+        if (mention.openId === identity.openId && mention.key && msg.kind === 'text') {
+          msg.text = msg.text.split(mention.key).join(' ').replace(/[ \t]{2,}/g, ' ').trim()
+        }
+      }
+      if (msg.kind === 'text' && !msg.text) return
+    }
+    if (enterpriseMode) {
+      // 飞书只会把已授权的群聊 @机器人 消息投递到这里。群聊同样按
+      // chatId + userId 隔离身份、项目选择、记忆与任务，不能在此整类丢弃。
+      try { await enterprises.refresh(projects) }
+      catch { await sendReply(msg.chatId,'项目权限暂时无法读取，请稍后重试。'); return }
+    }
+    msg.userProfile = await users.profile(apiClient, msg.userId, log)
+    msg.enterpriseName = projects.enterprise?.name || ''
+    msg.userName = msg.userProfile.name || msg.userId
+    if (await registration.handle(msg, sendReply,
+      (openId, profile) => store.syncRegistration?.(openId, profile),
+      openId => store.readRegistration?.(openId) ?? null)) return
+    const assignedProject = await store.assignedProject?.(msg)
+    if (assignedProject && projects.selectionFor(actorKey(msg)) === undefined) projects.setActive(actorKey(msg), assignedProject)
+    msg.boundProjectId = projects.selectionFor(actorKey(msg)) ?? projects.activeFor(msg.chatId)?.id ?? ''
+    if (enterpriseMode && msg.kind !== 'text' && msg.boundProjectId && !assistant.projectFor(msg)) {
+      await sendReply(msg.chatId,'当前项目已不可访问。请发送“返回普通聊天”或选择已授权项目后重新上传附件。'); return
+    }
     const preview = msg.kind === 'text' ? msg.text.slice(0, 60) : ('[' + msg.kind + '] ' + (msg.fileName ?? ''))
     log('收到消息 ' + msg.chatId + ' [' + (msg.userName || msg.userId) + ']: ' + preview)
     if (msg.msgId && seen.has(msg.msgId)) return
@@ -228,14 +307,12 @@ async function main() {
       seen.set(msg.msgId, Date.now())
       if (seen.size > 2000) seen.delete(seen.keys().next().value)
     }
-    const prev = queues.get(msg.chatId) ?? Promise.resolve()
-    const task = msg.kind === 'text'
-      ? () => assistant.processMessage(msg)
-      : () => handleAttachment(msg)
-    const next = prev
-      .then(task)
-      .catch(err => log('处理消息失败: ' + (err?.message ?? err)))
-    queues.set(msg.chatId, next)
+    if (msg.kind === 'text' && /^\s*\/(cancel|task)\b/i.test(msg.text)) {
+      await assistant.processMessage(msg)
+      return
+    }
+    const task = msg.kind === 'text' ? assistant.processMessage(msg) : handleAttachment(msg)
+    void task.catch(err => log('处理消息失败: ' + (err?.message ?? err)))
   }
 
   // ── 飞书通道 ───────────────────────────────────────────────────────
@@ -243,6 +320,14 @@ async function main() {
     appId: cfg.feishu.appId,
     appSecret: cfg.feishu.appSecret,
     onMessage: handleInbound,
+    onCardAction: async (msg, value) => {
+      try {
+        await enterprises.refresh(projects)
+        await assistant.confirmProject(msg, { nonce: value.nonce, projectId: value.projectId })
+      } catch {
+        await sendReply(msg.chatId, '项目确认暂时失败，请重新发送原问题。')
+      }
+    },
     log,
   })
 
@@ -256,186 +341,19 @@ async function main() {
         + '时间: ' + new Date(q.ts).toLocaleString('zh-CN', { hour12: false }) + '\n'
         + '问题: ' + q.text.slice(0, 120) + '\n'
         + '处理: 运营看板 http://127.0.0.1:' + cfg.adminPort + '/')
-    }).catch(err => log('未回答扫描失败: ' + (err?.message ?? err)))
+    }, assistant.runtime.tasks).catch(err => log('未回答扫描失败: ' + (err?.message ?? err)))
   }
   void scan()
   const scanTimer = setInterval(scan, 60_000)
+  const deliveryTimer = setInterval(() => { void assistant.runtime.retryDeliveries().catch(() => {}) }, 60000)
 
-  // ── HTTP 运营看板 ──────────────────────────────────────────────────
-  const sendJson = (res, data, status = 200) => {
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify(data))
-  }
-  const readBody = (req) => new Promise((resolve, reject) => {
-    const chunks = []
-    req.on('data', c => chunks.push(c))
-    req.on('end', () => {
-      try {
-        resolve(chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {})
-      } catch {
-        reject(new Error('invalid JSON body'))
-      }
-    })
-    req.on('error', reject)
-  })
-
-  const apiStatus = async () => {
-    const now = Date.now()
-    const dayStart = new Date()
-    dayStart.setHours(0, 0, 0, 0)
-    const dayStartTs = dayStart.getTime()
-    const records = await store.readRange(dayStartTs - 6 * 86400000, now)
-    const names = assistant.projectNames()
-    const open = await assistant.openQuestions()
-
-    const today = records.filter(r => r.ts >= dayStartTs)
-    const todayUser = today.filter(r => r.kind === 'user_message' && !COMMAND_RE.test(r.text ?? ''))
-    const todayAnswered = todayUser.filter(u => isAnswered(u, today)).length
-    const todayErrors = today.filter(r => r.kind === 'error').length
-
-    const byProject = new Map()
-    for (const r of today) {
-      const key = r.project ?? ''
-      let e = byProject.get(key)
-      if (!e) {
-        e = {
-          projectId: key,
-          projectName: key ? (names[key] ?? key) : '默认会话',
-          userMessages: 0, answered: 0, errors: 0,
-        }
-        byProject.set(key, e)
-      }
-      if (r.kind === 'user_message' && !COMMAND_RE.test(r.text ?? '')) e.userMessages += 1
-      if (r.kind === 'error') e.errors += 1
-    }
-    for (const e of byProject.values()) {
-      e.answered = todayUser.filter(u =>
-        (u.project ?? '') === e.projectId && isAnswered(u, today)).length
-      e.unanswered = e.userMessages - e.answered
-      e.rate = e.userMessages > 0 ? Math.round((e.answered / e.userMessages) * 100) : null
-    }
-    const perProject = [...byProject.values()].sort((a, b) => b.userMessages - a.userMessages)
-
-    const days = []
-    for (let i = 6; i >= 0; i--) {
-      const start = dayStartTs - i * 86400000
-      const end = start + 86400000
-      const recs = records.filter(r => r.ts >= start && r.ts < end)
-      const user = recs.filter(r => r.kind === 'user_message' && !COMMAND_RE.test(r.text ?? ''))
-      const answered = user.filter(u => isAnswered(u, recs)).length
-      const errors = recs.filter(r => r.kind === 'error').length
-      days.push({
-        day: new Date(start).toLocaleDateString('zh-CN'),
-        userMessages: user.length,
-        answered,
-        unanswered: user.length - answered,
-        errors,
-        rate: user.length > 0 ? Math.round((answered / user.length) * 100) : null,
-      })
-    }
-
-    return {
-      now,
-      timeoutSec: cfg.unansweredTimeoutSec,
-      today: {
-        userMessages: todayUser.length,
-        answered: todayAnswered,
-        unanswered: todayUser.length - todayAnswered,
-        errors: todayErrors,
-        totalRecords: today.length,
-      },
-      open: open.map(q => ({
-        ...q,
-        projectName: q.project ? (names[q.project] ?? q.project) : '默认会话',
-      })),
-      perProject,
-      days,
-    }
-  }
-
-  const apiChats = async () => {
-    const now = Date.now()
-    const records = await store.readRange(now - 7 * 86400000, now)
-    const names = assistant.projectNames()
-    const byChat = new Map()
-    for (const r of records) {
-      if (!r.chatId) continue
-      let c = byChat.get(r.chatId)
-      if (!c) {
-        c = {
-          platform: r.platform ?? 'feishu', chatId: r.chatId, lastTs: 0,
-          userCount: 0, assistantCount: 0, lastText: '', lastProject: '', userName: '',
-        }
-        byChat.set(r.chatId, c)
-      }
-      if (r.ts > c.lastTs) {
-        c.lastTs = r.ts
-        c.lastText = String(r.text ?? r.status ?? r.error ?? '').slice(0, 80)
-        c.lastProject = r.project ?? ''
-      }
-      if (r.userName) c.userName = r.userName
-      if (r.kind === 'user_message') c.userCount += 1
-      else if (r.kind === 'assistant_message') c.assistantCount += 1
-    }
-    const chats = [...byChat.values()].sort((a, b) => b.lastTs - a.lastTs)
-    for (const c of chats) {
-      c.projectName = c.lastProject ? (names[c.lastProject] ?? c.lastProject) : '默认会话'
-    }
-    return { chats }
-  }
-
-  const apiRecords = (url) => {
-    return (async () => {
-      const now = Date.now()
-      const chatId = url.searchParams.get('chatId') ?? undefined
-      const kind = url.searchParams.get('kind') ?? undefined
-      const limit = Math.min(Number(url.searchParams.get('limit') ?? 100) || 100, 500)
-      const from = Number(url.searchParams.get('from') ?? now - 7 * 86400000)
-      const records = await store.readRange(from, now)
-      const list = records
-        .filter(r => !chatId || r.chatId === chatId)
-        .filter(r => !kind || r.kind === kind)
-        .slice(-limit)
-        .reverse()
-      return { records: list }
-    })()
-  }
-
-  const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    // 访问令牌校验（未配置 adminToken 时跳过）：?token= 或 Authorization: Bearer <token>
-    if (cfg.adminToken) {
-      const token = url.searchParams.get('token') ?? String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
-      if (token !== cfg.adminToken) {
-        return sendJson(res, { error: 'unauthorized: pass ?token=<adminToken>' }, 401)
-      }
-    }
-    try {
-      if (url.pathname === '/' || url.pathname === '/index.html') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-        res.end(dashboardHtml())
-        return
-      }
-      if (url.pathname === '/api/status') return sendJson(res, await apiStatus())
-      if (url.pathname === '/api/chats') return sendJson(res, await apiChats())
-      if (url.pathname === '/api/records') return sendJson(res, await apiRecords(url))
-      if (url.pathname === '/api/projects') {
-        return sendJson(res, { projects: projects.list() })
-      }
-      if (url.pathname === '/api/resolve' && req.method === 'POST') {
-        const body = await readBody(req)
-        if (!body.qid) return sendJson(res, { error: 'qid is required' }, 400)
-        await resolveQuestion(store, String(body.qid), body.note)
-        return sendJson(res, { ok: true })
-      }
-      return sendJson(res, { error: 'not found' }, 404)
-    } catch (err) {
-      return sendJson(res, { error: String(err?.message ?? err) }, 500)
-    }
+  const server = createAdminServer({
+    cfg, root: ROOT, configFile, appVersion, startedAt, store, projects,
+    enterprises, enterpriseMode, projectConfiguration, assistant, users, apiClient,
+    feishuReady, log,
   })
   server.listen(cfg.adminPort, cfg.adminHost, () => {
-    const displayHost = cfg.adminHost === '0.0.0.0' ? '<服务器IP>' : cfg.adminHost
-    log('运营看板: http://' + displayHost + ':' + cfg.adminPort + '/' + (cfg.adminToken ? '?token=<adminToken>' : ''))
+    log('运营看板: http://' + cfg.adminHost + ':' + cfg.adminPort + '/')
   })
 
   // ── 优雅退出 ───────────────────────────────────────────────────────
@@ -445,17 +363,21 @@ async function main() {
     shuttingDown = true
     log('正在退出…')
     clearInterval(scanTimer)
+    clearInterval(deliveryTimer)
     server.close()
+    await assistant.dispose()
     await memory.dispose()
     await projects.dispose()
     await users.dispose()
     await store.saveState()
+    await store.close?.()
     process.exit(0)
   }
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
+  process.on('message', message => { if (message?.type === 'shutdown') void shutdown() })
 
-  log('需求助手已启动 v2026-09-05.2 | 模型: ' + cfg.llm.model
+  log('需求助手已启动 v2 | 后端: ' + cfg.backend + ' | 模型: ' + (cfg.backend === 'codex' ? (cfg.codex.model || 'Codex 默认') : cfg.llm.model)
     + ' | 推理强度: ' + (cfg.llm.reasoningEffort || '未设置')
     + ' | 数据目录: ' + cfg.dataDir)
 }

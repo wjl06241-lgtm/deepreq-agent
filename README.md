@@ -1,3 +1,11 @@
+# 需求助手：飞书 × Codex / DeepSeek
+
+阿里云仅部署管理平台：上传代码后执行 `bash deploy-admin.sh`，使用独立 Docker Compose 服务；首次配置和安全访问说明见 [部署文档](docs/独立管理平台部署.md#docker-compose-一键部署阿里云推荐方式)。
+
+独立管理平台：`npm run start:admin`，使用独立 `.env.admin`、默认端口 3900，直接连接云数据库，不启动飞书或模型。本地 `npm start` / `npm run background` 和原 3800/3801 入口不变。配置、功能边界与云部署步骤见 [独立管理平台部署](docs/独立管理平台部署.md)。
+
+已新增 Codex 本机后台运行、持久化任务、会话恢复、文档和图片工具。部署与操作见 [Codex 本机部署](docs/Codex本机部署.md)。默认后端由 `ASSISTANT_BACKEND` 控制；下方保留原 DeepSeek 服务说明。
+
 # 需求助手 —— 飞书机器人 × DeepSeek API（独立服务）
 
 在飞书里和「需求助手」对话：飞书机器人收消息 → 直接调用 **DeepSeek API（deepseek-v4-pro，推理强度 max）** → 回复发回飞书。**不依赖 DeepSeek Harness**，是一个独立的 Node.js 服务。
@@ -47,6 +55,25 @@ npm run chat             # ★ 终端模拟飞书对话：直接提问/发命令
 
 真飞书端到端：本机 `npm start` + 飞书后台「创建测试版本」即可（长连接免公网，见下一节第 5 步）。
 
+## 多个飞书 App 同时运行
+
+服务支持一个启动入口同时维护多个飞书长连接。每个 App 使用独立的凭据、数据目录、任务队列、用户缓存和管理端口；PostgreSQL 数据继续按 App ID 隔离。未启用多 App 配置时，原有 `.env` 单 App 配置仍可直接使用。
+
+首次启用：
+
+```powershell
+npm run apps:init
+```
+
+该命令会创建本机专用的 `.feishu-apps.json`，并把当前 App 纳入管理。此文件已加入 `.gitignore`。新增第二个 App 时：
+
+1. 在 `.env` 增加 `FEISHU_SECOND_APP_ID` 和 `FEISHU_SECOND_APP_SECRET`。
+2. 参照 [.feishu-apps.example.json](.feishu-apps.example.json)，向 `.feishu-apps.json` 的 `apps` 增加一项；每项必须使用不同的 `dataDir` 和 `adminPort`。
+3. 在新 App 的飞书后台按下一节开通机器人、权限、长连接事件和可用范围，并发布版本。
+4. 重启 `npm start` 或后台服务。启动器会一次拉起所有启用的 App；任一实例异常退出时会整体退出，由后台守护统一重启，避免只剩部分 App 在线。
+
+直接运行单实例用于排障：`npm run start:single`。新增 App 不要复用旧 App 的本地数据目录，因为飞书 `open_id` 与 App 绑定。
+
 ## 飞书应用配置（一次性，约 10 分钟）
 
 1. [飞书开放平台](https://open.feishu.cn/app) → 创建**企业自建应用**（个人/商店应用不支持长连接）
@@ -67,7 +94,7 @@ npm run chat             # ★ 终端模拟飞书对话：直接提问/发命令
    ```powershell
    npm start
    # 或进程守护（推荐）：
-   npm i -g pm2; pm2 start src/server.js --name req-assistant; pm2 save; pm2 startup
+   npm i -g pm2; pm2 start scripts/start.mjs --name req-assistant; pm2 save; pm2 startup
    ```
 4. **远程访问运营看板**（可选）：`.env` 里设
    ```

@@ -23,7 +23,7 @@ async function requestOnce(opts) {
         authorization: 'Bearer ' + apiKey,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+      signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(LLM_TIMEOUT_MS)]) : AbortSignal.timeout(LLM_TIMEOUT_MS),
     })
   } catch (err) {
     // 网络层失败：给出具体原因（DNS/连接拒绝/超时等），便于排查代理与网络
@@ -59,6 +59,7 @@ export async function chatCompletion(opts) {
     try {
       return await requestOnce(opts)
     } catch (err) {
+      opts.signal?.throwIfAborted()
       lastErr = err
       // 4xx（认证/参数）重试无意义，立即抛；网络类与 5xx 重试
       if (err.status >= 400 && err.status < 500) throw err

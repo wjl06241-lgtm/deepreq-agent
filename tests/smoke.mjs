@@ -12,7 +12,7 @@ import { parseCommand } from '../src/commands.js'
 import { isTextFile, buildFileMessageText, decodeTextBuffer, extractPdfText } from '../src/assistant.js'
 import iconv from 'iconv-lite'
 import { openQuestions, scanUnanswered, resolveQuestion, isAnswered } from '../src/monitor.js'
-import { parseReceiveEvent } from '../src/feishu.js'
+import { parseReceiveEvent, isMessageForBot } from '../src/feishu.js'
 import { loadRuntimeConfig } from '../src/config.js'
 
 let failed = 0
@@ -42,6 +42,11 @@ check('parse file event', evtFile && evtFile.kind === 'file' && evtFile.fileKey 
 // SDK 长连接模式把 event 解包到顶层（RequestHandle.parse 的 ...event）——回归用例
 const evt2 = parseReceiveEvent({ type: 'im.message.receive_v1', message: { message_type: 'text', content: '{"text":"顶层消息"}', chat_id: 'oc_z', message_id: 'om_2', chat_type: 'p2p' }, sender: { sender_id: { open_id: 'ou_w' } } })
 check('SDK-unwrapped event shape', evt2 && evt2.chatId === 'oc_z' && evt2.text === '顶层消息')
+const groupMention = parseReceiveEvent({ type: 'im.message.receive_v1', message: { message_type: 'text', content: '{"text":"@_user_1 你好"}', chat_id: 'oc_g', message_id: 'om_g', chat_type: 'group', mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '机器人' }] }, sender: { sender_id: { open_id: 'ou_u' } } })
+check('group only targets this bot', isMessageForBot(groupMention, 'ou_bot') && !isMessageForBot(groupMention, 'ou_other'))
+check('group bot identity fail closed', !isMessageForBot(groupMention, ''))
+const evtPost = parseReceiveEvent({ type: 'im.message.receive_v1', message: { message_type: 'post', content: '{"title":"","content":[[{"tag":"text","text":"/profile"}]]}', chat_id: 'oc_p', message_id: 'om_5', chat_type: 'p2p' }, sender: { sender_id: { open_id: 'ou_p' } } })
+check('parse rich-text post event', evtPost && evtPost.kind === 'text' && evtPost.text === '/profile')
 
 // 图片 MIME 识别
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])

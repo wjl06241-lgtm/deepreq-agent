@@ -1,0 +1,21 @@
+{
+  "adminBasePort": 3800,
+  "apps": [
+    {
+      "name": "现有应用",
+      "appIdEnv": "FEISHU_APP_ID",
+      "appSecretEnv": "FEISHU_APP_SECRET",
+      "dataDir": "./data",
+      "adminPort": 3800,
+      "enabled": true
+    },
+    {
+      "name": "第二个应用",
+      "appIdEnv": "FEISHU_SECOND_APP_ID",
+      "appSecretEnv": "FEISHU_SECOND_APP_SECRET",
+      "dataDir": "./data/apps/second",
+      "adminPort": 3801,
+      "enabled": false
+    }
+  ]
+}

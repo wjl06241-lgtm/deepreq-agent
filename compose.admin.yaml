@@ -1,0 +1,37 @@
+name: requirement-assistant-admin
+services:
+  admin:
+    image: requirement-assistant-admin:local
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: ./deploy/admin/state/app.env
+        format: raw
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Shanghai
+      ADMIN_ONLY_HOST: 0.0.0.0
+      ADMIN_ONLY_PORT: "3900"
+    ports:
+      - "${ADMIN_BIND_IP:-127.0.0.1}:${ADMIN_PUBLISH_PORT:-3900}:3900"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "deploy/admin/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

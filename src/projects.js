@@ -34,16 +34,21 @@ export class ProjectRegistry {
 
   activeFor(chatId) {
     const id = this.data.active[chatId]
-    return id ? (this.data.projects[id] ?? null) : null
+    return id ? this.get(id) : null
   }
 
   setActive(chatId, projectId) {
-    if (projectId) this.data.active[chatId] = projectId
+    if (projectId !== null && projectId !== undefined) this.data.active[chatId] = projectId
     else delete this.data.active[chatId]
     this._scheduleSave()
   }
 
+  selectionFor(chatId) { return this.data.active[chatId] }
+
   create(name) {
+    if (typeof name !== 'string' || !name.trim() || name.length > 60 || /[\\/:*?"<>|\x00-\x1f]/.test(name) || name === '.' || name === '..' || /[. ]$/.test(name)) {
+      throw new Error('项目名应为1到60个字符，不能包含路径分隔符或特殊文件名字符。')
+    }
     const id = 'p' + createHash('sha1').update(String(name) + ':' + Date.now()).digest('hex').slice(0, 10)
     const project = { id, name: String(name).slice(0, 60), createdAt: Date.now() }
     this.data.projects[id] = project
@@ -52,21 +57,21 @@ export class ProjectRegistry {
   }
 
   get(id) {
-    return this.data.projects[id] ?? null
+    return (this.catalog ?? this.data.projects)[id] ?? null
   }
 
   find(query) {
     const q = String(query ?? '').trim()
     if (!q) return null
-    if (this.data.projects[q]) return this.data.projects[q]
-    for (const p of Object.values(this.data.projects)) {
+    if (this.get(q)) return this.get(q)
+    for (const p of this.list()) {
       if (p.name === q) return p
     }
     return null
   }
 
   list() {
-    return Object.values(this.data.projects).sort((a, b) => a.createdAt - b.createdAt)
+    return Object.values(this.catalog ?? this.data.projects).sort((a, b) => a.createdAt - b.createdAt)
   }
 
   _scheduleSave() {

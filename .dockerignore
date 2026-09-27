@@ -1,0 +1,12 @@
+# Allowlist: never send credentials, chat records or project documents to Docker.
+**
+!package.json
+!package-lock.json
+!Dockerfile.admin
+!.dockerignore
+!src/
+!src/**
+!CHANGELOG.md
+!deploy/
+!deploy/admin/
+!deploy/admin/*.mjs

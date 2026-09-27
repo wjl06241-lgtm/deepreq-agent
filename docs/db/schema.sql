@@ -7,8 +7,8 @@ CREATE TABLE IF NOT EXISTS chat_records (
   id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   record_uuid CHAR(36)     NOT NULL COMMENT '记录唯一 id（对应 JSONL 的 id）',
   ts          BIGINT       NOT NULL COMMENT '事件时间戳（毫秒）',
-  kind        ENUM('user_message','assistant_message','error','unanswered','ops_note')
-                           NOT NULL COMMENT '记录类型',
+  kind        ENUM('user_message','assistant_message','attachment','error','unanswered','ops_note')
+                           NOT NULL COMMENT '记录类型（attachment=飞书附件事件）',
   platform    VARCHAR(16)  NOT NULL DEFAULT 'feishu' COMMENT '渠道',
   chat_id     VARCHAR(64)  NOT NULL COMMENT '飞书聊天 id（oc_…）',
   user_id     VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '发送者 open_id（ou_…）',

@@ -30,6 +30,15 @@ export function loadRuntimeConfig(overrides = {}) {
   const dataDir = overrides.dataDir ?? env.DATA_DIR ?? join(ROOT, 'data')
   return {
     dataDir,
+    database: { url: env.DATABASE_URL || '', enabled: env.DATABASE_ENABLED === 'true' },
+    backend: env.ASSISTANT_BACKEND || 'deepseek',
+    projectRouting: { enabled: env.PROJECT_ROUTING_ENABLED !== 'false' },
+    codex: {
+      bin: env.CODEX_BIN || 'codex', home: env.REQ_CODEX_HOME || '',
+      model: env.CODEX_MODEL || '', effort: env.CODEX_EFFORT || '',
+      timeoutMs: Number(env.CODEX_TIMEOUT_MS) || 900000,
+    },
+    documents: { maxBytes: Number(env.DOCUMENT_MAX_BYTES) || 30 * 1024 * 1024 },
     feishu: {
       appId: env.FEISHU_APP_ID ?? '',
       appSecret: env.FEISHU_APP_SECRET ?? '',
@@ -54,6 +63,12 @@ export function loadRuntimeConfig(overrides = {}) {
     adminHost: env.ADMIN_HOST ?? '127.0.0.1',
     // 看板访问令牌：留空 = 不校验（仅本机访问时）；绑到公网务必设置
     adminToken: env.ADMIN_TOKEN ?? '',
+    admin: {
+      username: env.ADMIN_USERNAME || 'admin',
+      passwordHash: env.ADMIN_PASSWORD_HASH || '',
+      sessionSecret: env.ADMIN_SESSION_SECRET || '',
+      sessionHours: Number(env.ADMIN_SESSION_HOURS) || 12,
+    },
     unansweredTimeoutSec: Number(env.UNANSWERED_TIMEOUT_SEC ?? 600) || 600,
     alertChats: (env.ALERT_CHATS ?? '')
       .split(',')

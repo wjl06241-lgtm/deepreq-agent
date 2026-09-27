@@ -1,4 +1,12 @@
 node_modules/
 .env
+.env.admin
+.env.admin.*
+!.env.admin.example
+.feishu-apps.json
 data/
 projects/
+
+.codex-schema/
+config.json
+deploy/admin/state/

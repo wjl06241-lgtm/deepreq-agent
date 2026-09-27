@@ -53,7 +53,8 @@ const rl = readline.createInterface({ input, output })
 process.on('SIGINT', async () => {
   console.log('')
   rl.close()
-  await memory.dispose()
+  await assistant.dispose()
+await memory.dispose()
   await projects.dispose()
   await store.saveState()
   process.exit(0)
@@ -75,6 +76,7 @@ for await (const line of rl) {
   process.stdout.write('你 > ')
 }
 rl.close()
+await assistant.dispose()
 await memory.dispose()
 await projects.dispose()
 await store.saveState()
