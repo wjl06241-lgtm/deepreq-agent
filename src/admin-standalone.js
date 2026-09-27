@@ -29,7 +29,7 @@ export function standaloneConfig(env = process.env) {
 }
 
 export function createDatabaseAdminStore(pool, appId) {
-  // Reuse read queries only, without constructing the local durable store.
+  // Reuse database queries without constructing the local bot/outbox store.
   const store = Object.create(PostgresStore.prototype)
   Object.assign(store, { pool, appId, enterpriseMode: true, adminAllApps: true,
     health: { enabled: true, connected: true, lastSuccessAt: Date.now(), errorCode: null },

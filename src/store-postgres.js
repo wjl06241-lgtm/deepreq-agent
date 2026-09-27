@@ -230,6 +230,7 @@ export class PostgresStore {
       SELECT u.id, u.app_id AS "appId", e.name AS "enterpriseName",
         u.external_user_id AS "openId", u.display_name AS name,
         u.registration,
+        COALESCE(n.note, '') AS "adminNote", n.updated_at AS "adminNoteUpdatedAt",
         u.avatar_url AS avatar, u.profile_status AS "profileStatus",
         u.created_at AS "createdAt", u.updated_at AS "updatedAt",
         COALESCE(s.conversations, 0)::int AS "conversationCount",
@@ -239,6 +240,12 @@ export class PostgresStore {
       FROM ${S}.users u
       LEFT JOIN ${S}.enterprise_apps ea ON ea.app_id=u.app_id
       LEFT JOIN ${S}.enterprises e ON e.id=ea.enterprise_id
+      LEFT JOIN LATERAL (
+        SELECT payload->>'note' AS note, created_at AS updated_at
+        FROM ${S}.enterprise_audit
+        WHERE action='user-note' AND payload->>'userId'=u.id::text
+        ORDER BY id DESC LIMIT 1
+      ) n ON true
       LEFT JOIN LATERAL (
         SELECT
           (SELECT count(*) FROM ${S}.conversations c WHERE c.user_id=u.id) AS conversations,
@@ -257,11 +264,17 @@ export class PostgresStore {
     this.succeeded(); return { users: result.rows, total: total.rows[0].count }
   }
   async adminUserDetails(openId) {
-    const user = (await this.pool.query(`SELECT id,app_id AS "appId",external_user_id AS "openId",display_name AS name,
-      registration,
-      avatar_url AS avatar,profile_status AS "profileStatus",profile_updated_at AS "profileUpdatedAt",
-      created_at AS "createdAt",updated_at AS "updatedAt"
-      FROM ${S}.users WHERE platform='feishu' AND app_id=$1 AND external_user_id=$2`, [this.appId, openId])).rows[0]
+    const user = (await this.pool.query(`SELECT u.id,u.app_id AS "appId",u.external_user_id AS "openId",u.display_name AS name,
+      u.registration,COALESCE(n.note,'') AS "adminNote",n.updated_at AS "adminNoteUpdatedAt",
+      n.updated_by AS "adminNoteUpdatedBy",
+      u.avatar_url AS avatar,u.profile_status AS "profileStatus",u.profile_updated_at AS "profileUpdatedAt",
+      u.created_at AS "createdAt",u.updated_at AS "updatedAt"
+      FROM ${S}.users u LEFT JOIN LATERAL (
+        SELECT payload->>'note' AS note,payload->>'actor' AS updated_by,created_at AS updated_at
+        FROM ${S}.enterprise_audit WHERE action='user-note' AND payload->>'userId'=u.id::text
+        ORDER BY id DESC LIMIT 1
+      ) n ON true
+      WHERE u.platform='feishu' AND u.app_id=$1 AND u.external_user_id=$2`, [this.appId, openId])).rows[0]
     if (!user) return null
     const conversations = await this.pool.query(`SELECT c.id,c.chat_id AS "chatId",c.project_id AS "projectId",
       p.name AS "projectName",c.backend,c.codex_thread_id AS "codexThreadId",c.status,
@@ -274,6 +287,17 @@ export class PostgresStore {
       mime_type AS "mimeType",size_bytes AS "sizeBytes",parse_status AS "parseStatus",created_at AS "createdAt"
       FROM ${S}.attachments WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100`, [user.id])
     this.succeeded(); return { user, conversations: conversations.rows, attachments: attachments.rows }
+  }
+  async adminSaveUserNote(openId, note, actor) {
+    const value = String(note).trim()
+    const result = await this.pool.query(`INSERT INTO ${S}.enterprise_audit(action,payload)
+      SELECT 'user-note',jsonb_build_object('userId',u.id::text,'appId',u.app_id,
+        'openId',u.external_user_id,'note',$3::text,'actor',$4::text)
+      FROM ${S}.users u WHERE u.platform='feishu' AND u.app_id=$1 AND u.external_user_id=$2
+      RETURNING created_at AS "updatedAt"`, [this.appId, openId, value, actor])
+    if (!result.rows[0]) return null
+    this.succeeded()
+    return { note: value, updatedAt: result.rows[0].updatedAt, updatedBy: actor }
   }
   async adminConversations({ userId = '', limit = 100, offset = 0 } = {}) {
     const result = await this.pool.query(`SELECT c.id,c.chat_id AS "chatId",c.project_id AS "projectId",

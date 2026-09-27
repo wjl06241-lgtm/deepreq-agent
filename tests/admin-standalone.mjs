@@ -17,22 +17,28 @@ assert.throws(() => standaloneConfig({ ...env, ADMIN_ONLY_PORT: '-1' }))
 
 const queries = []
 let databaseDown = false
+let savedNote = ''
 const pool = { async query(sql, args) {
   queries.push({ sql, args })
   if (databaseDown) throw new Error('postgresql://secret:password@private-host')
   if (sql.includes('to_regclass')) return { rows: [{ t: 'requirement_assistant.enterprises' }] }
   if (sql.includes('SELECT e.*')) return { rows: [{ id: 'e-test', name: 'Test Hospital' }] }
   if (sql.includes('AS "memberOpenIds"')) return { rows: [{ id: 'p-test', name: 'Test Project', createdAt: new Date() }] }
-  if (sql.includes('SELECT payload')) return { rows: [] }
+  if (sql.includes('FROM requirement_assistant.records')) return { rows: [] }
   if (sql.includes('FROM requirement_assistant.tasks t')) return { rows: [{ id: 't-test', status: 'completed', project: 'p-test' }] }
   if (sql.includes('SELECT u.id, u.app_id AS "appId"')) return { rows: [
-    { id: 'u-current', appId: 'cli_test', openId: 'ou_current', enterpriseName: 'Test Hospital' },
-    { id: 'u-other', appId: 'cli_other', openId: 'ou_other', enterpriseName: 'Other Hospital' },
+    { id: 'u-current', appId: 'cli_test', openId: 'ou_current', enterpriseName: 'Test Hospital', adminNote: '' },
+    { id: 'u-other', appId: 'cli_other', openId: 'ou_other', enterpriseName: 'Other Hospital', adminNote: savedNote },
   ] }
   if (sql.includes('SELECT count(*)::int AS count FROM requirement_assistant.users')) return { rows: [{ count: 2 }] }
-  if (sql.includes('SELECT id,app_id AS "appId",external_user_id AS "openId"')) return {
+  if (sql.includes('SELECT u.id,u.app_id AS "appId",u.external_user_id AS "openId"')) return {
     rows: args[0] === 'cli_other' && args[1] === 'ou_other'
-      ? [{ id: 'u-other', appId: 'cli_other', openId: 'ou_other', name: 'Other User' }] : [],
+      ? [{ id: 'u-other', appId: 'cli_other', openId: 'ou_other', name: 'Other User', adminNote: savedNote }] : [],
+  }
+  if (sql.includes('INSERT INTO requirement_assistant.enterprise_audit')) {
+    if (args[0] !== 'cli_other' || args[1] !== 'ou_other') return { rows: [] }
+    savedNote = args[2]
+    return { rows: [{ updatedAt: new Date() }] }
   }
   if (sql.includes('AS "messageCount"') && sql.includes('ORDER BY COALESCE')) return { rows: [{ id: 'c-test', messageCount: 2 }] }
   return { rows: [] }
@@ -65,10 +71,20 @@ try {
   const otherUser = await (await fetch(base + '/api/admin/users/ou_other?appId=cli_other', { headers })).json()
   assert.equal(otherUser.user.appId, 'cli_other')
   assert.equal((await fetch(base + '/api/admin/users/ou_other?appId=bad', { headers })).status, 400)
+  assert.ok(queries.every(q => /^SELECT\b/.test(q.sql.trim())), 'startup and read endpoints never mutate database')
+  const noteUrl = base + '/api/admin/users/ou_other/note?appId=cli_other'
+  assert.equal((await fetch(noteUrl, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ note: '待跟进' }) })).status, 403)
+  assert.equal((await fetch(noteUrl, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ note: 'x'.repeat(2001) }) })).status, 400)
+  const saved = await (await fetch(noteUrl, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ note: '  待跟进  ' }) })).json()
+  assert.equal(saved.note, '待跟进')
+  assert.equal(saved.updatedBy, 'admin')
+  assert.equal((await (await fetch(base + '/api/admin/users/ou_other?appId=cli_other', { headers })).json()).user.adminNote, '待跟进')
+  assert.equal((await (await fetch(base + '/api/admin/users', { headers })).json()).users[1].adminNote, '待跟进')
+  assert.equal(queries.filter(q => q.sql.includes('INSERT INTO requirement_assistant.enterprise_audit')).length, 1)
   const conversations = await (await fetch(base + '/api/admin/conversations', { headers })).json()
   assert.equal(conversations.conversations[0].id, 'c-test')
   assert.ok(queries.some(q => q.sql.includes('FROM requirement_assistant.conversations c JOIN requirement_assistant.users u') && q.args?.[0] === 'cli_test'))
-  for (const item of queries.filter(q => q.sql.includes('SELECT payload') || q.sql.includes('FROM requirement_assistant.tasks t'))) assert.ok(item.args.includes('cli_test'))
+  for (const item of queries.filter(q => q.sql.includes('FROM requirement_assistant.records') || q.sql.includes('FROM requirement_assistant.tasks t'))) assert.ok(item.args.includes('cli_test'))
   assert.equal((await fetch(base + '/api/enterprise/project', { method: 'POST', headers: { cookie }, body: '{}' })).status, 403)
   for (const [path, method] of [
     ['/api/admin/users/ou_test/refresh', 'POST'], ['/api/admin/attachments/test/download', 'GET'],
@@ -82,7 +98,6 @@ try {
   const failure = await fetch(base + '/api/status', { headers })
   assert.equal(failure.status, 500)
   assert.doesNotMatch(await failure.text(), /secret|password|private-host/)
-  assert.ok(queries.every(q => /^SELECT\b/.test(q.sql.trim())), 'startup and read endpoints never mutate database')
 } finally { await new Promise(ok => server.close(ok)) }
 
 // Shared HTTP module retains the integrated runtime behavior after extraction.

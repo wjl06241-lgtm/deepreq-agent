@@ -337,6 +337,18 @@ export function createAdminServer({
         await store.flush?.()
         return sendJson(res, { profile })
       }
+      if (url.pathname.startsWith('/api/admin/users/') && url.pathname.endsWith('/note') && req.method === 'POST') {
+        const openId = decodeURIComponent(url.pathname.slice('/api/admin/users/'.length, -'/note'.length))
+        const requestedAppId = standalone ? url.searchParams.get('appId') : null
+        if (!/^ou_[a-zA-Z0-9]+$/.test(openId)) return sendJson(res, { error: '飞书用户 ID 无效' }, 400)
+        if (requestedAppId && !/^cli_[a-zA-Z0-9]+$/.test(requestedAppId)) return sendJson(res, { error: '应用 ID 无效' }, 400)
+        const body = await readBody(req)
+        if (typeof body.note !== 'string' || body.note.length > 2000 || body.note.includes('\0')) return sendJson(res, { error: '备注不能超过 2000 字' }, 400)
+        const scopedStore = requestedAppId ? Object.assign(Object.create(store), { appId: requestedAppId }) : store
+        if (!scopedStore.adminSaveUserNote) return sendJson(res, { error: '用户备注需要启用 PostgreSQL' }, 503)
+        const saved = await scopedStore.adminSaveUserNote(openId, body.note, session.username)
+        return saved ? sendJson(res, saved) : sendJson(res, { error: '用户不存在' }, 404)
+      }
       if (url.pathname.startsWith('/api/admin/users/')) {
         const openId = decodeURIComponent(url.pathname.slice('/api/admin/users/'.length))
         const requestedAppId = standalone ? url.searchParams.get('appId') : null
