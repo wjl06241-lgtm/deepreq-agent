@@ -24,6 +24,9 @@ const pool = { async query(sql, args) {
   if (sql.includes('to_regclass')) return { rows: [{ t: 'requirement_assistant.enterprises' }] }
   if (sql.includes('SELECT e.*')) return { rows: [{ id: 'e-test', name: 'Test Hospital' }] }
   if (sql.includes('AS "memberOpenIds"')) return { rows: [{ id: 'p-test', name: 'Test Project', createdAt: new Date() }] }
+  if (sql.includes('a.enterprise_id AS "enterpriseId",coalesce(n.note')) return { rows: [
+    { id: 'u-other', appId: 'cli_other', openId: 'ou_other', enterpriseId: 'e-test', adminNote: savedNote },
+  ] }
   if (sql.includes('FROM requirement_assistant.records')) return { rows: [] }
   if (sql.includes('FROM requirement_assistant.tasks t')) return { rows: [{ id: 't-test', status: 'completed', project: 'p-test' }] }
   if (sql.includes('SELECT u.id, u.app_id AS "appId"')) return { rows: [
@@ -49,7 +52,9 @@ const base = 'http://127.0.0.1:' + server.address().port
 try {
   const home = await fetch(base)
   assert.equal(home.status, 200)
-  assert.doesNotMatch(await home.text(), /data-page="conversations"/)
+  const homeHtml = await home.text()
+  assert.doesNotMatch(homeHtml, /data-page="conversations"/)
+  assert.match(homeHtml, /org-user-note/)
   assert.equal((await fetch(base + '/api/status')).status, 401)
   assert.equal((await fetch(base + '/api/enterprise/catalog')).status, 401)
   const denied = await fetch(base + '/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'wrong' }) })
@@ -80,6 +85,8 @@ try {
   assert.equal(saved.updatedBy, 'admin')
   assert.equal((await (await fetch(base + '/api/admin/users/ou_other?appId=cli_other', { headers })).json()).user.adminNote, '待跟进')
   assert.equal((await (await fetch(base + '/api/admin/users', { headers })).json()).users[1].adminNote, '待跟进')
+  const catalog = await (await fetch(base + '/api/enterprise/catalog', { headers })).json()
+  assert.equal(catalog.users[0].adminNote, '待跟进')
   assert.equal(queries.filter(q => q.sql.includes('INSERT INTO requirement_assistant.enterprise_audit')).length, 1)
   const conversations = await (await fetch(base + '/api/admin/conversations', { headers })).json()
   assert.equal(conversations.conversations[0].id, 'c-test')

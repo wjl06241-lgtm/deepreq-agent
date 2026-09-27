@@ -17,7 +17,16 @@ export class Enterprises {
       (SELECT count(*)::int FROM ${S}.conversations c WHERE c.project_id=p.id OR EXISTS(SELECT 1 FROM ${S}.project_legacy_conversations l WHERE l.conversation_id=c.id AND l.project_id=p.id)) AS "conversationCount",
       (SELECT count(*)::int FROM ${S}.messages m JOIN ${S}.conversations c ON c.id=m.conversation_id WHERE c.project_id=p.id OR EXISTS(SELECT 1 FROM ${S}.project_legacy_conversations l WHERE l.conversation_id=c.id AND l.project_id=p.id)) AS "messageCount"
       FROM ${S}.projects p LEFT JOIN ${S}.project_members pm ON pm.project_id=p.id WHERE p.enterprise_id IS NOT NULL GROUP BY p.id ORDER BY p.created_at`)).rows
-    const users=(await this.pool.query(`SELECT u.id,u.external_user_id AS "openId",u.app_id AS "appId",coalesce(nullif(u.display_name,''),u.registration->>'name','未获取姓名') AS name,a.enterprise_id AS "enterpriseId" FROM ${S}.users u LEFT JOIN ${S}.enterprise_apps a ON a.app_id=u.app_id WHERE u.platform='feishu' ORDER BY u.created_at`)).rows
+    const users=(await this.pool.query(`SELECT u.id,u.external_user_id AS "openId",u.app_id AS "appId",
+      coalesce(nullif(u.display_name,''),u.registration->>'name','未获取姓名') AS name,
+      a.enterprise_id AS "enterpriseId",coalesce(n.note,'') AS "adminNote"
+      FROM ${S}.users u LEFT JOIN ${S}.enterprise_apps a ON a.app_id=u.app_id
+      LEFT JOIN LATERAL (
+        SELECT payload->>'note' AS note FROM ${S}.enterprise_audit
+        WHERE action='user-note' AND payload->>'userId'=u.id::text
+        ORDER BY id DESC LIMIT 1
+      ) n ON true
+      WHERE u.platform='feishu' ORDER BY u.created_at`)).rows
     return {enterprises,projects,users,currentAppId:this.appId}
   }
   async refresh(registry){
