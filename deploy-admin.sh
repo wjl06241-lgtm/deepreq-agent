@@ -26,15 +26,24 @@ if ! [[ "$task_major" =~ ^[0-9]+$ && "$task_minor" =~ ^[0-9]+$ ]] || (( task_maj
   printf '需要 Docker Compose >= 2.30，避免密码哈希中的 $ 被错误展开。\n' >&2
   exit 1
 fi
+task_state="$task_root/deploy/admin/state"
+mkdir -p -- "$task_state"
+chmod 700 -- "$task_state"
+# Read only deployment settings saved on this host. Explicit environment values win.
+if [[ -f "$task_state/deploy.env" ]]; then
+  while IFS='=' read -r task_key task_value; do
+    case "$task_key" in
+      ADMIN_PUBLISH_PORT) [[ -n "${ADMIN_PUBLISH_PORT:-}" ]] || ADMIN_PUBLISH_PORT="$task_value" ;;
+      ADMIN_BIND_IP) [[ -n "${ADMIN_BIND_IP:-}" ]] || ADMIN_BIND_IP="$task_value" ;;
+    esac
+  done < "$task_state/deploy.env"
+fi
 export ADMIN_PUBLISH_PORT="${ADMIN_PUBLISH_PORT:-3900}"
 export ADMIN_BIND_IP="${ADMIN_BIND_IP:-127.0.0.1}"
 [[ "$ADMIN_PUBLISH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && (( ADMIN_PUBLISH_PORT <= 65535 )) || { printf '发布端口无效。\n' >&2; exit 1; }
 if [[ "$ADMIN_BIND_IP" != '127.0.0.1' ]]; then
   printf '注意：当前选择非回环监听。请配置 HTTPS 和访问限制，不要通过公网 HTTP 输入管理员密码。\n' >&2
 fi
-task_state="$task_root/deploy/admin/state"
-mkdir -p -- "$task_state"
-chmod 700 -- "$task_state"
 # Prevent Compose from loading the local bot .env or unrelated project overrides.
 compose=(docker compose --env-file /dev/null --project-name requirement-assistant-admin -f "$task_root/compose.admin.yaml")
 
@@ -67,7 +76,7 @@ printf '正在检查数据库与企业绑定（不写业务数据）……\n'
 "${compose[@]}" run --rm --no-deps admin node deploy/admin/preflight.mjs
 printf '正在启动并等待健康检查……\n'
 "${compose[@]}" up -d --wait --wait-timeout 120 admin
-printf '\n部署成功。服务器本机入口：http://127.0.0.1:%s/\n' "$ADMIN_PUBLISH_PORT"
+printf '\n部署成功。监听地址：%s:%s\n' "$ADMIN_BIND_IP" "$ADMIN_PUBLISH_PORT"
 printf '配置文件：%s/app.env\n' "$task_state"
 if [[ -f "$task_state/initial-password.txt" ]]; then
   printf '初始账号密码：%s/initial-password.txt（妥善保存后删除明文文件）\n' "$task_state"
