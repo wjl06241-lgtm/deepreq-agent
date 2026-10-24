@@ -10,3 +10,10 @@ projects/
 .codex-schema/
 config.json
 deploy/admin/state/
+
+# Generated documents and local temporary files
+/outputs/
+/tmp/
+
+# Local reverse-proxy configuration
+/active_health_project_config_v2/nginx.conf
